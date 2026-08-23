@@ -1,0 +1,157 @@
+<script>
+(function(){
+  'use strict';
+  var SEED = %%SEED%%;
+  var META = %%META%%;
+  var reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var variant = 0;
+
+  function slugHash(s){ var h=2166136261>>>0;
+    for(var i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619); }
+    return h>>>0; }
+
+  document.getElementById('seed-view').textContent = SEED;
+  document.getElementById('foot-seed').textContent = 'seed ' + SEED;
+
+  // ---------- grid instances ----------
+  var live = {};   // slug -> {api, canvas, visible, wantRun}
+  function makeInstance(slug, canvas){
+    var api = window.PIECES[slug](canvas, (SEED ^ slugHash(slug)) >>> 0);
+    return { api: api, canvas: canvas, visible: false, running: false };
+  }
+  function startIf(rec){
+    if (!rec || rec.running) return;
+    if (reduced) { rec.api.resize(); rec.api.step(); rec.api.render(); return; }
+    rec.api.start(); rec.running = true;
+  }
+  function stopIt(rec){ if (rec && rec.running){ rec.api.stop(); rec.running=false; } }
+
+  META.forEach(function(m){
+    var canvas = document.getElementById('cv-' + m.slug);
+    if (!canvas || !window.PIECES[m.slug]) return;
+    live[m.slug] = makeInstance(m.slug, canvas);
+    attachPointer(canvas, function(nx,ny){ live[m.slug].api.perturb(nx,ny); });
+  });
+
+  // hero runs the physarum piece full-bleed
+  var hero = null, heroCanvas = document.getElementById('hero-canvas');
+  if (window.PIECES['physarum'] && heroCanvas){
+    hero = makeInstance('physarum', heroCanvas);
+    heroCanvas.addEventListener('pointermove', function(e){
+      var r = heroCanvas.getBoundingClientRect();
+      hero.api.perturb((e.clientX-r.left)/r.width, (e.clientY-r.top)/r.height);
+    });
+  }
+
+  // ---------- visibility management ----------
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(en){
+      var slug = en.target.getAttribute('data-slug');
+      var rec = slug === '__hero__' ? hero : live[slug];
+      if (!rec) return;
+      rec.visible = en.isIntersecting;
+      if (obsOpen) return;                    // observation mode owns the CPU
+      if (en.isIntersecting) startIf(rec); else stopIt(rec);
+    });
+  }, { threshold: 0.12 });
+  Object.keys(live).forEach(function(slug){
+    var el = document.getElementById('cv-'+slug).parentElement;
+    el.setAttribute('data-slug', slug); io.observe(el);
+  });
+  if (heroCanvas){ heroCanvas.parentElement.setAttribute('data-slug','__hero__');
+    io.observe(heroCanvas.parentElement); }
+
+  document.addEventListener('visibilitychange', function(){
+    var all = allRecs();
+    if (document.hidden) all.forEach(stopIt);
+    else if (!obsOpen) all.forEach(function(r){ if (r.visible) startIf(r); });
+    else if (obsRec) startIf(obsRec);
+  });
+  function allRecs(){ var a = Object.keys(live).map(function(k){return live[k];});
+    if (hero) a.push(hero); return a; }
+
+  // ---------- pointer helper ----------
+  function attachPointer(canvas, fn){
+    var down = false;
+    function norm(e){ var r = canvas.getBoundingClientRect();
+      fn(Math.min(1,Math.max(0,(e.clientX-r.left)/r.width)),
+         Math.min(1,Math.max(0,(e.clientY-r.top)/r.height))); }
+    canvas.addEventListener('pointerdown', function(e){ down=true;
+      canvas.setPointerCapture(e.pointerId); norm(e); });
+    canvas.addEventListener('pointermove', function(e){ if(down) norm(e); });
+    canvas.addEventListener('pointerup',   function(){ down=false; });
+    canvas.addEventListener('pointercancel', function(){ down=false; });
+  }
+
+  // ---------- regrow ----------
+  document.getElementById('regrow').addEventListener('click', function(){
+    variant++;
+    allRecs().forEach(function(r){ r.api.reseed(); if (reduced){ r.api.step(); r.api.render(); } });
+    if (obsRec) obsRec.api.reseed();
+    document.getElementById('seed-view').textContent = SEED + (variant ? ' · variant ' + variant : '');
+  });
+
+  // ---------- window resize ----------
+  var rt = null;
+  addEventListener('resize', function(){
+    clearTimeout(rt);
+    rt = setTimeout(function(){
+      allRecs().forEach(function(r){ r.api.resize(); if(!r.running){ r.api.render(); } });
+      if (obsRec){ obsRec.api.resize(); if(!obsRec.running) obsRec.api.render(); }
+    }, 160);
+  });
+
+  // ---------- observation mode ----------
+  var obs = document.getElementById('obs'), obsOpen = false, obsRec = null, obsSlug = null;
+  var obsCanvas = document.getElementById('obs-canvas');
+  var pauseBtn = document.getElementById('obs-pause');
+  attachPointer(obsCanvas, function(nx,ny){ if (obsRec) obsRec.api.perturb(nx,ny); });
+
+  function openObs(slug){
+    var m = META.find(function(x){ return x.slug === slug; });
+    if (!m || !window.PIECES[slug]) return;
+    obsSlug = slug; obsOpen = true;
+    document.getElementById('obs-fno').textContent = m.fno;
+    document.getElementById('obs-fno').style.color = m.accent;
+    document.getElementById('obs-name').textContent = m.name;
+    document.getElementById('obs-taxon').textContent = m.subtitle;
+    document.getElementById('obs-detail').innerHTML =
+      '<b>' + m.rule + '</b> ' + m.detail + ' <span style="opacity:.75">' + m.interaction + '</span>';
+    obs.classList.add('on');
+    allRecs().forEach(stopIt);                       // the room goes quiet
+    obsRec = makeInstance(slug, obsCanvas);          // same specimen, full size
+    if (reduced){ obsRec.api.resize(); obsRec.api.step(); obsRec.api.render();
+      pauseBtn.textContent = 'play'; }
+    else { startIf(obsRec); pauseBtn.textContent = 'pause'; }
+    document.getElementById('obs-close').focus();
+  }
+  function closeObs(){
+    if (!obsOpen) return;
+    obsOpen = false; obs.classList.remove('on');
+    if (obsRec){ obsRec.api.destroy(); obsRec = null; }
+    allRecs().forEach(function(r){ if (r.visible) startIf(r); });
+  }
+  document.getElementById('obs-close').addEventListener('click', closeObs);
+  document.getElementById('obs-reseed').addEventListener('click', function(){
+    if (obsRec){ obsRec.api.reseed(); if(!obsRec.running){ obsRec.api.step(); obsRec.api.render(); } }
+  });
+  pauseBtn.addEventListener('click', function(){
+    if (!obsRec) return;
+    if (obsRec.running){ stopIt(obsRec); pauseBtn.textContent = 'play'; }
+    else { obsRec.api.start(); obsRec.running = true; pauseBtn.textContent = 'pause'; }
+  });
+  addEventListener('keydown', function(e){ if (e.key === 'Escape') closeObs(); });
+  META.forEach(function(m){
+    var btn = document.getElementById('ex-' + m.slug);
+    if (btn) btn.addEventListener('click', function(e){
+      e.stopPropagation(); openObs(m.slug);
+    });
+    var ttl = document.getElementById('ttl-' + m.slug);
+    if (ttl){ ttl.style.cursor = 'pointer';
+      ttl.addEventListener('click', function(){ openObs(m.slug); }); }
+  });
+
+  // reduced-motion: render one considered frame everywhere
+  if (reduced) allRecs().forEach(function(r){ r.api.resize(); r.api.step(); r.api.render(); });
+})();
+</script>
